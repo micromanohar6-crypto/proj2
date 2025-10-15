@@ -1,0 +1,232 @@
+import React, { useRef, useState } from "react";
+
+// Simple single-file React component that lets a user upload images, preview them,
+// set a frame duration, and export a video (webm) made from those images.
+// Uses Tailwind for styling (no imports required in this context). Default export
+// is the component so it can be dropped into a React app.
+
+export default function ImageToVideoApp() {
+  const [images, setImages] = useState([]);
+  const [frameMs, setFrameMs] = useState(1000); // default 1 second per image
+  const [isRecording, setIsRecording] = useState(false);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const canvasRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    Promise.all(
+      imageFiles.map((file) => {
+        return new Promise((res) => {
+          const img = new Image();
+          img.onload = () => res({ file, url: URL.createObjectURL(file), width: img.width, height: img.height });
+          img.src = URL.createObjectURL(file);
+        });
+      })
+    ).then((items) => {
+      setImages((prev) => [...prev, ...items]);
+    });
+  }
+
+  function removeImage(idx) {
+    setImages((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function moveUp(idx) {
+    if (idx === 0) return;
+    setImages((prev) => {
+      const arr = [...prev];
+      [arr[idx - 1], arr[idx]] = [arr[idx], arr[idx - 1]];
+      return arr;
+    });
+  }
+
+  function moveDown(idx) {
+    setImages((prev) => {
+      if (idx === prev.length - 1) return prev;
+      const arr = [...prev];
+      [arr[idx + 1], arr[idx]] = [arr[idx], arr[idx + 1]];
+      return arr;
+    });
+  }
+
+  async function generateVideo() {
+    if (!images.length) return alert("Please upload at least one image.");
+    setIsRecording(true);
+    setVideoUrl(null);
+
+    // Create an off-screen canvas sized to the first image (or a default)
+    const first = images[0];
+    const width = Math.max(640, first.width || 640);
+    const height = Math.max(360, first.height || 360);
+
+    const canvas = canvasRef.current;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+
+    // Use captureStream + MediaRecorder to record the canvas to a webm blob
+    const stream = canvas.captureStream(30); // 30 fps
+    const options = { mimeType: "video/webm; codecs=vp9" };
+
+    let recordedChunks = [];
+    try {
+      mediaRecorderRef.current = new MediaRecorder(stream, options);
+    } catch (e) {
+      // Fallback if codec unsupported
+      mediaRecorderRef.current = new MediaRecorder(stream);
+    }
+
+    mediaRecorderRef.current.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) recordedChunks.push(ev.data);
+    };
+
+    mediaRecorderRef.current.start();
+
+    // draw each image for frameMs milliseconds
+    for (let i = 0; i < images.length; i++) {
+      await drawImageOnCanvas(ctx, images[i].url, width, height);
+      // wait frameMs (but we will also request animation frames so the recorder captures)
+      await sleep(frameMs);
+    }
+
+    // stop recording
+    mediaRecorderRef.current.stop();
+
+    // wait for recorder to finalize
+    const videoBlob = await waitForBlob(recordedChunks, mediaRecorderRef.current);
+    const url = URL.createObjectURL(videoBlob);
+    setVideoUrl(url);
+    setIsRecording(false);
+  }
+
+  function sleep(ms) {
+    return new Promise((res) => setTimeout(res, ms));
+  }
+
+  function waitForBlob(chunks, recorder) {
+    return new Promise((res) => {
+      // onstop event sometimes already fired; attach and resolve after a short timeout if needed
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: "video/webm" });
+        res(blob);
+      };
+      // safety: resolve after 1s if onstop didn't fire
+      setTimeout(() => {
+        if (chunks.length) {
+          const blob = new Blob(chunks, { type: "video/webm" });
+          res(blob);
+        }
+      }, 1000 + frameMs);
+    });
+  }
+
+  function drawImageOnCanvas(ctx, url, width, height) {
+    return new Promise((res) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous"; // in case users provide remote images
+      img.onload = () => {
+        // clear
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        // maintain aspect ratio and center
+        const ar = img.width / img.height;
+        let drawW = width,
+          drawH = width / ar;
+        if (drawH > height) {
+          drawH = height;
+          drawW = height * ar;
+        }
+        const dx = (width - drawW) / 2;
+        const dy = (height - drawH) / 2;
+        ctx.drawImage(img, dx, dy, drawW, drawH);
+        // small marker: frame count or watermark can be added here if desired
+        res();
+      };
+      img.onerror = () => {
+        // on error, fill a blank frame
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, width, height);
+        res();
+      };
+      img.src = url;
+    });
+  }
+
+  function downloadVideo() {
+    if (!videoUrl) return;
+    const a = document.createElement("a");
+    a.href = videoUrl;
+    a.download = "slideshow.webm";
+    a.click();
+  }
+
+  return (
+    <div className="p-4 max-w-4xl mx-auto font-serif">
+      <h2 className="text-2xl font-bold mb-3">Image → Video (simple)</h2>
+      <p className="mb-3 text-sm">Upload images, set frame duration, generate a combined video (webm).</p>
+
+      <div className="mb-3">
+        <input type="file" accept="image/*" multiple onChange={handleFiles} />
+      </div>
+
+      <div className="mb-3 flex items-center gap-4">
+        <label className="text-sm">Frame duration (ms):</label>
+        <input
+          type="number"
+          value={frameMs}
+          onChange={(e) => setFrameMs(Number(e.target.value))}
+          className="border px-2 py-1 w-32"
+        />
+        <button
+          onClick={generateVideo}
+          disabled={isRecording}
+          className={`px-3 py-1 rounded ${isRecording ? "bg-gray-300" : "bg-blue-600 text-white"}`}
+        >
+          {isRecording ? "Recording..." : "Generate Video"}
+        </button>
+        {videoUrl && (
+          <>
+            <button onClick={downloadVideo} className="px-3 py-1 rounded bg-green-600 text-white">
+              Download
+            </button>
+            <a href={videoUrl} target="_blank" rel="noreferrer" className="ml-2 underline text-sm">
+              Open in new tab
+            </a>
+          </>
+        )}
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        {images.map((it, idx) => (
+          <div key={idx} className="border p-1 text-xs bg-white">
+            <img src={it.url} alt={`img-${idx}`} className="w-full h-32 object-contain" />
+            <div className="flex justify-between mt-1">
+              <div>
+                <button onClick={() => moveUp(idx)} className="text-sm mr-1">▲</button>
+                <button onClick={() => moveDown(idx)} className="text-sm mr-1">▼</button>
+              </div>
+              <button onClick={() => removeImage(idx)} className="text-red-600 text-sm">Remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <canvas ref={canvasRef} style={{ width: 640, height: 360, display: "none" }} />
+
+      <div className="mt-4">
+        {videoUrl ? (
+          <video src={videoUrl} controls style={{ width: "100%", maxWidth: 800 }} />
+        ) : (
+          <div className="text-sm text-gray-600">No video generated yet.</div>
+        )}
+      </div>
+
+      <div className="mt-6 text-xs text-gray-500">
+        Tip: For best results upload similarly sized images. Output format is WebM (VP9/VP8); some browsers may
+        not support download playback — use a modern Chromium-based browser for generation and playback.
+      </div>
+    </div>
+  );
+}
